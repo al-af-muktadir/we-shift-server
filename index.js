@@ -15,7 +15,10 @@ const generateTrackingId = () => {
 };
 
 const admin = require("firebase-admin");
-const serviceAccount = require("./adminKey.json");
+// const serviceAccount = require("./adminKey.json");
+const decoded = Buffer.from(process.env.ADMIN_KEY, "base64").toString("utf8");
+const serviceAccount = JSON.parse(decoded);
+const { pipeline } = require("stream");
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -26,8 +29,7 @@ app.use(express.json());
 app.use(cors());
 const port = process.env.PORT || 3000;
 dns.setServers(["1.1.1.1", "8.8.8.8"]);
-const uri =
-  "mongodb+srv://weshift:bakugan@cluster0.l1vdkel.mongodb.net/?appName=Cluster0";
+const uri = `mongodb+srv://${process.env.ID}:${process.env.PASS}@cluster0.l1vdkel.mongodb.net/?appName=Cluster0`;
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -130,6 +132,20 @@ async function run() {
       const result = await parcelCollection.find(query).toArray();
       console.log(result);
 
+      res.send(result);
+    });
+
+    app.get("/parcels/deliveryStatus/admin", async (req, res) => {
+      const pipeline = [
+        {
+          $group: {
+            _id: "$deliveryStatus",
+            count: { $sum: 1 },
+          },
+        },
+      ];
+
+      const result = await parcelCollection.aggregate(pipeline).toArray();
       res.send(result);
     });
 
@@ -434,10 +450,10 @@ async function run() {
       res.send(result);
     });
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!",
-    );
+    // await client.db("admin").command({ ping: 1 });
+    // console.log(
+    //   "Pinged your deployment. You successfully connected to MongoDB!",
+    // );
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
