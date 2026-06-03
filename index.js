@@ -26,7 +26,12 @@ admin.initializeApp({
 
 const app = express();
 app.use(express.json());
-app.use(cors());
+app.use(
+  cors({
+    origin: ["http://localhost:5173", "https://weshare-fc36f.web.app"],
+    credentials: true,
+  }),
+);
 const port = process.env.PORT || 3000;
 dns.setServers(["1.1.1.1", "8.8.8.8"]);
 const uri = `mongodb+srv://${process.env.ID}:${process.env.PASS}@cluster0.l1vdkel.mongodb.net/?appName=Cluster0`;
@@ -240,8 +245,8 @@ async function run() {
           parcel_id: paymentInfo.parcel_id,
           parcelName: paymentInfo.parcelName,
         },
-        success_url: `http://localhost:5173/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `http://localhost:5173/dashboard/payment-cancelled`,
+        success_url: `https://weshare-fc36f.web.app/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `https://weshare-fc36f.web.app/dashboard/payment-cancelled`,
       });
       res.send({ url: session.url });
     });
