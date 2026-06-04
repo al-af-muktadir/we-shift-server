@@ -70,6 +70,17 @@ const verifyAdmin = async (req, res, next) => {
   }
   next();
 };
+
+const verifyRider = async (req, res, next) => {
+  const email = req.decoded_email;
+  const user = await userCollection.findOne({ email });
+
+  if (!user || user.role !== "rider") {
+    return res.status(403).send({ message: "Forbidden Access" });
+  }
+
+  next();
+};
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
@@ -165,35 +176,40 @@ async function run() {
       res.json(result);
     });
 
-    app.patch("/parcels/:id/reviewassign", verifyToken, async (req, res) => {
-      const { deliveryStatus, trackingId } = req.body;
-      const query = { _id: new ObjectId(req.params.id) };
-      const updatedDoc = {
-        $set: {
-          deliveryStatus,
-        },
-      };
-      const result = await parcelCollection.updateOne(query, updatedDoc);
-      const parcel = await parcelCollection.findOne(query);
-      if (
-        parcel.riderEmail === req.decoded_email &&
-        parcel.deliveryStatus === "delivered"
-      ) {
-        const update3 = {
+    app.patch(
+      "/parcels/:id/reviewassign",
+      verifyToken,
+      verifyRider,
+      async (req, res) => {
+        const { deliveryStatus, trackingId } = req.body;
+        const query = { _id: new ObjectId(req.params.id) };
+        const updatedDoc = {
           $set: {
-            workingStatus: "available",
+            deliveryStatus,
           },
         };
-        const result2 = await RiderCollection.updateOne(
-          { email: parcel.riderEmail },
-          update3,
-        );
-      }
-      logTracking(trackingId.deliveryStatus);
-      res.send(result);
-    });
+        const result = await parcelCollection.updateOne(query, updatedDoc);
+        const parcel = await parcelCollection.findOne(query);
+        if (
+          parcel.riderEmail === req.decoded_email &&
+          parcel.deliveryStatus === "delivered"
+        ) {
+          const update3 = {
+            $set: {
+              workingStatus: "available",
+            },
+          };
+          const result2 = await RiderCollection.updateOne(
+            { email: parcel.riderEmail },
+            update3,
+          );
+        }
+        logTracking(trackingId, deliveryStatus);
+        res.send(result);
+      },
+    );
 
-    app.patch("/parcels/:id", async (req, res) => {
+    app.patch("/parcels/:id", verifyToken, verifyAdmin, async (req, res) => {
       const { parcelId, riderId, riderName, riderEmail, trackingId } = req.body;
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
@@ -222,88 +238,137 @@ async function run() {
     });
 
     //payment
-    app.post("/create-checkout-session", async (req, res) => {
-      const paymentInfo = req.body;
-      // console.log(paymetnInfo, "paymentinto");
-      const session = await stripe.checkout.sessions.create({
-        line_items: [
-          {
-            price_data: {
-              currency: "BDT",
-              product_data: {
-                name: paymentInfo.parcelName,
+    app.post("/create-checkout-session", verifyToken, async (req, res) => {
+      try {
+        const paymentInfo = req.body;
+
+        console.log(paymentInfo, "paymentInfo");
+
+        if (
+          !paymentInfo?.cost ||
+          !paymentInfo?.parcel_id ||
+          !paymentInfo?.senderEmail ||
+          !paymentInfo?.parcelName
+        ) {
+          return res.status(400).send({
+            message: "Missing payment information",
+            paymentInfo,
+          });
+        }
+
+        const session = await stripe.checkout.sessions.create({
+          line_items: [
+            {
+              price_data: {
+                currency: "BDT",
+                product_data: {
+                  name: paymentInfo.parcelName,
+                },
+                unit_amount: Number(paymentInfo.cost) * 100,
               },
-              unit_amount: paymentInfo.cost * 100,
+              quantity: 1,
             },
-
-            quantity: 1,
+          ],
+          customer_email: paymentInfo.senderEmail,
+          mode: "payment",
+          metadata: {
+            parcel_id: paymentInfo.parcel_id,
+            parcelName: paymentInfo.parcelName,
           },
-        ],
-        customer_email: paymentInfo.senderEmail,
-        mode: "payment",
-        metadata: {
-          parcel_id: paymentInfo.parcel_id,
-          parcelName: paymentInfo.parcelName,
-        },
-        success_url: `https://weshare-fc36f.web.app/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `https://weshare-fc36f.web.app/dashboard/payment-cancelled`,
-      });
-      res.send({ url: session.url });
-    });
+          success_url:
+            "https://weshare-fc36f.web.app/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}",
+          cancel_url:
+            "https://weshare-fc36f.web.app/dashboard/payment-cancelled",
+        });
 
-    app.patch("/payment-success", async (req, res) => {
-      const session_id = req.query.session_id;
-      console.log(session_id);
+        res.send({ url: session.url });
+      } catch (err) {
+        console.error("Stripe checkout error:", err.message);
 
-      const trackingId = generateTrackingId();
-      const session = await stripe.checkout.sessions.retrieve(session_id);
-      const transactionId = session.payment_intent;
-      query = { transactionId: transactionId };
-      const isExist = await paymentCollection.findOne(query);
-      if (isExist) {
-        return res.json({
-          success: true,
-          message: "Payment already recorded",
-          trackingId: isExist.trackingId,
-          transactionId: isExist.transactionId,
+        res.status(400).send({
+          message: err.message,
         });
       }
+    });
 
-      if (session.payment_status === "paid") {
-        const id = session.metadata.parcel_id;
-        const query = { _id: new ObjectId(id) };
-        const update = {
-          $set: {
-            paymentStatus: "paid",
-            deliveryStatus: "pending_pickup",
-            trackingId: trackingId,
+    app.post("/payment-success", verifyToken, async (req, res) => {
+      try {
+        const session_id = req.query.session_id;
+
+        if (!session_id) {
+          return res.status(400).send({ message: "session_id is required" });
+        }
+
+        console.log("Payment success session_id:", session_id);
+
+        const session = await stripe.checkout.sessions.retrieve(session_id);
+        const transactionId = session.payment_intent;
+
+        const existingPayment = await paymentCollection.findOne({
+          transactionId,
+        });
+
+        if (existingPayment) {
+          return res.json({
+            success: true,
+            message: "Payment already recorded",
+            trackingId: existingPayment.trackingId,
+            transactionId: existingPayment.transactionId,
+          });
+        }
+
+        if (session.payment_status !== "paid") {
+          return res.status(400).send({
+            success: false,
+            message: "Payment not completed",
+            paymentStatus: session.payment_status,
+          });
+        }
+
+        const trackingId = generateTrackingId();
+        const parcelId = session.metadata.parcel_id;
+
+        const updateResult = await parcelCollection.updateOne(
+          { _id: new ObjectId(parcelId) },
+          {
+            $set: {
+              paymentStatus: "paid",
+              deliveryStatus: "pending_pickup",
+              trackingId,
+            },
           },
-        };
-        const result = await parcelCollection.updateOne(query, update);
+        );
 
         const payment = {
           amount: session.amount_total / 100,
           currency: session.currency,
           customerEmail: session.customer_email,
-          parcelId: session.metadata.parcel_id,
+          parcelId,
           parcelName: session.metadata.parcelName,
-          transactionId: session.payment_intent,
+          transactionId,
           paymentStatus: session.payment_status,
-          trackingId: trackingId,
+          trackingId,
           paidAt: new Date(),
         };
 
-        if (session.payment_status === "paid") {
-          const resultPayment = await paymentCollection.insertOne(payment);
-          logTracking(trackingId, "pennding_pickup");
-          res.json({
-            success: true,
-            paymentInfo: resultPayment,
-            trackingId: trackingId,
-            updateInfo: result,
-            transactionId: payment.transactionId,
-          });
-        }
+        const resultPayment = await paymentCollection.insertOne(payment);
+
+        await logTracking(trackingId, "pending_pickup");
+
+        res.json({
+          success: true,
+          paymentInfo: resultPayment,
+          trackingId,
+          updateInfo: updateResult,
+          transactionId,
+        });
+      } catch (err) {
+        console.error("Payment success error:", err.message);
+
+        res.status(500).send({
+          success: false,
+          message: err.message,
+        });
       }
     });
 
@@ -321,7 +386,7 @@ async function run() {
       }
     });
 
-    app.get("/users", verifyToken, async (req, res) => {
+    app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
       const search = req.query.searchText;
       const query = {};
       if (search) {
@@ -337,7 +402,7 @@ async function run() {
       res.send(result);
     });
 
-    app.post("/riders", async (req, res) => {
+    app.post("/riders", verifyToken, async (req, res) => {
       const rider = req.body;
       rider.status = "pending";
       const email = req.body.email;
@@ -363,7 +428,7 @@ async function run() {
       }
     });
 
-    app.get("/riders", async (req, res) => {
+    app.get("/riders", verifyToken, verifyAdmin, async (req, res) => {
       const query = {};
       if (req.query.status) {
         query.status = req.query.status;
@@ -380,7 +445,7 @@ async function run() {
       res.send(result, "hahah");
     });
 
-    app.patch("/riders/:id", async (req, res) => {
+    app.patch("/riders/:id", verifyToken, verifyAdmin, async (req, res) => {
       const session = client.startSession();
 
       try {
@@ -441,16 +506,42 @@ async function run() {
       res.send(result);
     });
 
-    app.get("/users/:email/role", async (req, res) => {
+    app.get("/users/profile", verifyToken, async (req, res) => {
+      try {
+        const email = req.query.email;
+
+        if (!email) {
+          return res.status(400).send({ message: "Email is required" });
+        }
+
+        if (email !== req.decoded_email) {
+          return res.status(403).send({ message: "Forbidden Access" });
+        }
+
+        const user = await userCollection.findOne({ email });
+
+        if (!user) {
+          return res.status(404).send({ message: "User not found" });
+        }
+
+        res.send(user);
+      } catch (error) {
+        res.status(500).send({ message: error.message });
+      }
+    });
+
+    app.get("/users/:email/role", verifyToken, async (req, res) => {
       const email = req.params.email;
       const query = { email };
       const user = await userCollection.findOne(query);
-      res.send({ role: user?.role || "user" });
+      res.send({ role: user?.role });
     });
     app.get("/users/:id", async (req, res) => {});
 
     app.get("/track/:trackingId", async (req, res) => {
       const trackingId = req.params.trackingId;
+
+      console.log("tracking id", trackingId);
       const result = await trackingCollection.find({ trackingId }).toArray();
       res.send(result);
     });
